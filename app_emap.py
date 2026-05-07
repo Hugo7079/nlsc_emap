@@ -44,13 +44,27 @@ mod = _load_module()
 
 
 def _get_runtime_secret(name: str) -> str:
-    """優先讀取 Streamlit Secrets，其次讀取環境變數。"""
+    """優先讀取 Streamlit Secrets（含巢狀/大小寫差異），其次讀取環境變數。"""
+    target = name.strip().upper()
     try:
-        if name in st.secrets:
-            return str(st.secrets[name]).strip()
+        direct = st.secrets.get(name)
+        if direct is not None and str(direct).strip():
+            return str(direct).strip()
+
+        for k, v in st.secrets.items():
+            if str(k).strip().upper() == target and str(v).strip():
+                return str(v).strip()
+            if hasattr(v, "items"):
+                for nk, nv in v.items():
+                    if str(nk).strip().upper() == target and str(nv).strip():
+                        return str(nv).strip()
     except Exception:
         pass
-    return os.getenv(name, "").strip()
+    for env_key in (name, name.lower(), name.upper()):
+        val = os.getenv(env_key, "").strip()
+        if val:
+            return val
+    return ""
 
 
 def _sync_llm_runtime_config():
