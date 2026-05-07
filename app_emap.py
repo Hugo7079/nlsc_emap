@@ -13,6 +13,7 @@ NLSC 臺灣通用電子地圖 異動情資蒐整 — Streamlit 互動介面
 
 import sys
 import importlib
+import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -40,6 +41,44 @@ def _load_module():
     return m
 
 mod = _load_module()
+
+
+def _get_runtime_secret(name: str) -> str:
+    """優先讀取 Streamlit Secrets，其次讀取環境變數。"""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return os.getenv(name, "").strip()
+
+
+def _sync_llm_runtime_config():
+    """每次 rerun 同步 LLM 設定，避免 import/caching 吃到舊值。"""
+    api_key = _get_runtime_secret("EMAP_LLM_API_KEY")
+    base_url = _get_runtime_secret("EMAP_LLM_BASE_URL")
+    model = _get_runtime_secret("EMAP_LLM_MODEL")
+    timeout_raw = _get_runtime_secret("EMAP_LLM_TIMEOUT")
+
+    if api_key:
+        mod.LLM_CFG["api_key"] = api_key
+    if base_url:
+        mod.LLM_CFG["base_url"] = base_url
+    if model:
+        mod.LLM_CFG["model"] = model
+    if timeout_raw:
+        try:
+            mod.LLM_CFG["timeout"] = int(timeout_raw)
+        except ValueError:
+            pass
+
+
+def _dedup_runtime_mode() -> str:
+    has_api_key = bool(str(mod.LLM_CFG.get("api_key", "")).strip())
+    return "LLM" if (mod.LLM_DEDUP and has_api_key) else "fallback文字"
+
+
+_sync_llm_runtime_config()
 
 # 所有支援的縣市清單
 ALL_CITIES = [
@@ -141,6 +180,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────
 def apply_params():
     """把 UI 設定寫回 demo_emap_intelligence 的全域變數"""
+    _sync_llm_runtime_config()
     shorts = []
     for c in selected_cities:
         shorts.extend(CITY_SHORT_MAP.get(c, []))
@@ -353,7 +393,8 @@ with tab_flow:
     st.markdown("#### 一鍵操作")
     st.write("左側的「全部執行」會清除本頁快取，依序重跑新聞、工程會分析，並產出案管更新版。若只想重新寫 Excel，可使用「產出案管更新版」，它也會先清除快取並重跑資料。")
     st.write("若「分析完成後自動更新案管檔」保持開啟，只要本次按鈕執行後新聞與工程會結果都存在，就會自動重寫更新版 Excel。")
-    st.caption("目前新聞去重模式：固定使用 LLM 智慧去重；LLM 呼叫失敗時核心模組才會保守退回文字相似度。")
+    key_status = "已偵測到 LLM Key" if str(mod.LLM_CFG.get("api_key", "")).strip() else "未偵測到 LLM Key"
+    st.caption(f"目前新聞去重模式：{_dedup_runtime_mode()}（{key_status}）。")
 
 # ══════════════════════════════════════════════════════════════
 # TAB 1：新聞爬搜
