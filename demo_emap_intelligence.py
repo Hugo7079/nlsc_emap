@@ -539,13 +539,23 @@ def _llm_same_news_event(a: dict, b: dict, body_key: str) -> tuple[bool, str]:
     用 LLM 判斷兩則新聞是否為同一工程案件/同一異動事件。
     這裡刻意提供標題、案名、日期、來源、摘要，不只看標題。
     """
+    a_case, b_case = str(a.get("_case", "") or ""), str(b.get("_case", "") or "")
+    a_title, b_title = str(a.get("_title", "") or ""), str(b.get("_title", "") or "")
+    
+    # 1. 嚴格防護：如果雙方都有明確的路線數字且不重疊，絕對不能合併為同一案
+    ra_case, rb_case = _route_tags(a_case), _route_tags(b_case)
+    if ra_case and rb_case and ra_case.isdisjoint(rb_case):
+        return False, f"案名路線不同({sorted(ra_case)} vs {sorted(rb_case)})"
+    
+    ra = ra_case or _route_tags(a_title)
+    rb = rb_case or _route_tags(b_title)
+    if ra and rb and ra.isdisjoint(rb):
+        return False, f"路線不同({sorted(ra)} vs {sorted(rb)})"
+
+    # 2. 同網址快速判斷
     a_url = _clean_url(a.get("_url", ""))
     b_url = _clean_url(b.get("_url", ""))
     if a_url and b_url and a_url == b_url:
-        a_case, b_case = str(a.get("_case", "") or ""), str(b.get("_case", "") or "")
-        ra_case, rb_case = _route_tags(a_case), _route_tags(b_case)
-        if ra_case and rb_case and ra_case.isdisjoint(rb_case):
-            return False, f"同網址但案名路線不同({sorted(ra_case)} vs {sorted(rb_case)})"
         case_score = _overlap_score(a_case, b_case)
         if (_dedup_key(a_case) and _dedup_key(a_case) == _dedup_key(b_case)) or case_score >= 0.86:
             return True, f"同網址且案名相近(case_score={case_score:.2f})"
@@ -564,9 +574,9 @@ def _llm_same_news_event(a: dict, b: dict, body_key: str) -> tuple[bool, str]:
     import urllib.request as _ur
     prompt = (
         "不要解釋，不要推理。\n"
-        "請判斷以下兩則新聞是否描述同一個工程案件或同一個工程進度異動事件。\n"
+        "請判斷以下兩則資料是否描述「完全相同的單一工程案件」。\n"
         "判斷時要看案名、地點、工程內容、日期與摘要，不可只看標題。\n"
-        "若只是同縣市、同類工程、同道路類型，不能算同一案。\n\n"
+        "【重要規則】：若兩則新聞描述的是『不同條道路』（例如台61線 vs 台62線）、『不同個設施』或『不同的子工程』，即使它們屬於同一個大建設案、由同一個政府部門發布或出現在同一篇新聞中，也【必須判斷為不同】。\n\n"
         "新聞A：\n"
         f"{_news_brief(a, body_key)}\n\n"
         "新聞B：\n"
