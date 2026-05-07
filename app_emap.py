@@ -131,10 +131,10 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    run_news = st.button("執行新聞爬搜", use_container_width=True)
-    run_pcc  = st.button("執行工程會分析", use_container_width=True)
-    run_update = st.button("產出案管更新版", use_container_width=True)
-    run_all  = st.button("全部執行", type="primary", use_container_width=True)
+    run_news = st.button("執行新聞爬搜", width="stretch")
+    run_pcc  = st.button("執行工程會分析", width="stretch")
+    run_update = st.button("產出案管更新版", width="stretch")
+    run_all  = st.button("全部執行", type="primary", width="stretch")
 
 # ─────────────────────────────────────────────────────────────
 # 套用使用者參數到模組全域變數
@@ -323,7 +323,7 @@ with tab_flow:
         {"步驟": "4. 新聞爬搜", "輸入": "每日新聞JSON + Google News RSS", "處理": "位置/工程詞/鄰近性/LLM去重整併", "輸出": "案名、網址、備註、進度、完工日"},
         {"步驟": "5. 案管更新", "輸入": "工程會異動 + 新聞結果", "處理": "既有案更新；未命中新聞新增候選列", "輸出": "115EMAP案管_更新版.xlsx + 更新日誌"},
     ])
-    st.dataframe(flow_steps, use_container_width=True, hide_index=True, height=220)
+    st.dataframe(flow_steps, width="stretch", hide_index=True, height=220)
 
     st.markdown("#### 目前產出狀態")
     f1, f2, f3, f4 = st.columns(4)
@@ -410,7 +410,7 @@ with tab_news:
 
             st.dataframe(
                 df_display,
-                use_container_width=True,
+                width="stretch",
                 height=420,
                 column_config={
                     "網址": st.column_config.LinkColumn("網址", display_text="🔗"),
@@ -450,7 +450,7 @@ with tab_news:
             with st.expander("🔍 去重追蹤記錄（Debug）"):
                 all_dedup = (json_dedup or []) + (web_dedup or [])
                 df_dedup = pd.DataFrame(all_dedup)
-                st.dataframe(df_dedup, use_container_width=True, height=300)
+                st.dataframe(df_dedup, width="stretch", height=300)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 2：工程會清冊
@@ -497,7 +497,7 @@ with tab_pcc:
                         pd.to_numeric(df_new_disp["核對追蹤_預算金額【千元】"], errors="coerce")
                         .fillna(0).astype(int) // 10
                     )
-                st.dataframe(df_new_disp, use_container_width=True, height=360)
+                st.dataframe(df_new_disp, width="stretch", height=360)
                 st.download_button(
                     "下載建議新增清單",
                     data=df_new.to_csv(index=False, encoding="utf-8-sig"),
@@ -512,7 +512,7 @@ with tab_pcc:
                 df_exist = pd.DataFrame(t1_exist)
                 keep_e = [c for c in ["基本資料_案名","篩選結果","篩選說明",
                           "坐落_縣市","坐落_區"] if c in df_exist.columns]
-                st.dataframe(df_exist[keep_e], use_container_width=True, height=260)
+                st.dataframe(df_exist[keep_e], width="stretch", height=260)
             else:
                 st.info("無相關記錄")
 
@@ -527,7 +527,7 @@ with tab_pcc:
                 st.dataframe(
                     df_t2.style.applymap(_color_changed, subset=["有無異動"])
                     if "有無異動" in df_t2.columns else df_t2,
-                    use_container_width=True, height=400
+                    width="stretch", height=400
                 )
                 st.download_button(
                     "下載異動追蹤",
@@ -543,7 +543,7 @@ with tab_pcc:
             for label, data in [("測試3", t3), ("測試4", t4)]:
                 st.markdown(f"**{label}**")
                 if data:
-                    st.dataframe(pd.DataFrame(data), use_container_width=True, height=220)
+                    st.dataframe(pd.DataFrame(data), width="stretch", height=220)
                 else:
                     st.info(f"{label}：無資料")
 
@@ -570,7 +570,7 @@ with tab_update_tab:
             show_df = log_df.copy()
             if src_pick and "資料來源" in show_df.columns:
                 show_df = show_df[show_df["資料來源"].isin(src_pick)]
-            st.dataframe(show_df, use_container_width=True, height=420, hide_index=True)
+            st.dataframe(show_df, width="stretch", height=420, hide_index=True)
 
             with open(out_path, "rb") as f:
                 st.download_button(
