@@ -401,7 +401,23 @@ def _news_has_build(title: str, body: str, build_kws: list) -> bool:
 
 
 def _clean_url(url: str) -> str:
-    return url if url else ""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        import urllib.parse as _up
+        sp = _up.urlsplit(raw)
+        query_pairs = _up.parse_qsl(sp.query, keep_blank_values=True)
+        drop_keys = {
+            "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+            "fbclid", "gclid", "igshid", "mkt_tok",
+        }
+        kept = [(k, v) for k, v in query_pairs if k.lower() not in drop_keys]
+        query = _up.urlencode(kept, doseq=True)
+        path = sp.path.rstrip("/")
+        return _up.urlunsplit((sp.scheme.lower(), sp.netloc.lower(), path, query, ""))
+    except Exception:
+        return raw
 
 
 def _extract_llm_content(resp_obj: dict) -> str:
@@ -523,6 +539,18 @@ def _llm_same_news_event(a: dict, b: dict, body_key: str) -> tuple[bool, str]:
     用 LLM 判斷兩則新聞是否為同一工程案件/同一異動事件。
     這裡刻意提供標題、案名、日期、來源、摘要，不只看標題。
     """
+    a_url = _clean_url(a.get("_url", ""))
+    b_url = _clean_url(b.get("_url", ""))
+    if a_url and b_url and a_url == b_url:
+        a_case, b_case = str(a.get("_case", "") or ""), str(b.get("_case", "") or "")
+        ra_case, rb_case = _route_tags(a_case), _route_tags(b_case)
+        if ra_case and rb_case and ra_case.isdisjoint(rb_case):
+            return False, f"同網址但案名路線不同({sorted(ra_case)} vs {sorted(rb_case)})"
+        case_score = _overlap_score(a_case, b_case)
+        if (_dedup_key(a_case) and _dedup_key(a_case) == _dedup_key(b_case)) or case_score >= 0.86:
+            return True, f"同網址且案名相近(case_score={case_score:.2f})"
+        return False, f"同網址但案名不同(case_score={case_score:.2f})"
+
     if not LLM_DEDUP or not LLM_CFG["api_key"]:
         return _fallback_same_news_event(a, b)
 
@@ -1168,12 +1196,20 @@ def parse_manual_news_urls(urls: list[str], loc_kws: list, build_kws: list, nois
 # ─────────────────────────────────────────────────────────────
 # 7. 合併去重
 # ─────────────────────────────────────────────────────────────
-def merge_news(json_news: list, web_news: list) -> list:
-    """合併 JSON 與 Web 來源；同一工程事件用 LLM 判斷，不再只看標題或案名桶鍵。"""
+def merge_news_with_track(news_items: list) -> tuple[list, list]:
+    """
+    整合多來源新聞並做同一輪去重（JSON / Web / 手動網址可一起進來）。
+    回傳 (results, dedup_track)。
+    """
     buckets: dict[str, dict] = {}
+    dedup_track: list[dict] = []
+    track_seq = 0
 
-    for n in json_news + web_news:
-        record = dict(n)
+    for n in news_items or []:
+        record = dict(n or {})
+        if not record:
+            continue
+        track_seq += 1
         candidate = {
             "_body": " ".join([
                 str(record.get("備註", "") or ""),
@@ -1185,9 +1221,20 @@ def merge_news(json_news: list, web_news: list) -> list:
             "_source": record.get("來源", ""),
             "_date": record.get("通報日期", ""),
             "_case": record.get("案名", ""),
+            "_track_id": track_seq,
             "_record": record,
         }
-        bkt_key, _ = _resolve_news_bucket(candidate, buckets, "_body")
+        bkt_key, dedup_reason = _resolve_news_bucket(candidate, buckets, "_body")
+        dedup_track.append({
+            "track_id": track_seq,
+            "title": record.get("新聞標題", ""),
+            "date": record.get("通報日期", ""),
+            "content_len": len(candidate["_body"]),
+            "llm_label": "✅ 去重候選",
+            "bucket_key": bkt_key,
+            "dedup_reason": dedup_reason,
+            "result": "PENDING",
+        })
         existing = buckets.get(bkt_key)
         if existing is None:
             buckets[bkt_key] = candidate
@@ -1197,14 +1244,26 @@ def merge_news(json_news: list, web_news: list) -> list:
             existing["_record"].get("來源分類", ""),
             record.get("來源分類", ""),
         ]) - {""}
+        merged_src = "+".join(sorted(src_types))
         if _prefer_news_candidate(candidate, existing, "_body"):
-            candidate["_record"]["來源分類"] = "+".join(sorted(src_types))
+            candidate["_record"]["來源分類"] = merged_src
             buckets[bkt_key] = candidate
         else:
-            existing["_record"]["來源分類"] = "+".join(sorted(src_types))
+            existing["_record"]["來源分類"] = merged_src
+
+    winner_ids = {v.get("_track_id") for v in buckets.values()}
+    for entry in dedup_track:
+        if entry.get("result") == "PENDING":
+            entry["result"] = "✅ 保留" if entry.get("track_id") in winner_ids else "🔀 去重"
 
     result = sorted((v["_record"] for v in buckets.values()),
                     key=lambda x: x["通報日期"], reverse=True)
+    return result, dedup_track
+
+
+def merge_news(json_news: list, web_news: list) -> list:
+    """相容舊介面：合併兩個來源並回傳去重後清單。"""
+    result, _ = merge_news_with_track((json_news or []) + (web_news or []))
     return result
 
 

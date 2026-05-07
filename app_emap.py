@@ -287,8 +287,10 @@ def run_news_search(cities_key, news_days_val, web_qty_val, manual_urls_key):
     web_news,  web_dedup  = mod.web_search_news(loc_kws, build_kws, noise_kws)
     manual_urls = [u.strip() for u in str(manual_urls_key or "").splitlines() if u.strip()]
     manual_news, manual_dedup = mod.parse_manual_news_urls(manual_urls, loc_kws, build_kws, noise_kws)
-    all_news = mod.merge_news(mod.merge_news(json_news, web_news), manual_news)
-    web_dedup = (web_dedup or []) + (manual_dedup or [])
+    all_news, merged_dedup = mod.merge_news_with_track(
+        (json_news or []) + (web_news or []) + (manual_news or [])
+    )
+    web_dedup = (web_dedup or []) + (manual_dedup or []) + (merged_dedup or [])
     return all_news, json_news, web_news, json_dedup, web_dedup, loc_kws
 
 @st.cache_data(show_spinner=False)
