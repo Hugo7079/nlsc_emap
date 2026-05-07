@@ -94,6 +94,10 @@ def _dedup_runtime_mode() -> str:
 
 _sync_llm_runtime_config()
 
+
+def _llm_key_loaded() -> bool:
+    return bool(str(mod.LLM_CFG.get("api_key", "")).strip())
+
 # 所有支援的縣市清單
 ALL_CITIES = [
     "臺北市", "新北市", "桃園市", "臺中市", "臺南市", "高雄市",
@@ -182,6 +186,10 @@ with st.sidebar:
         value=True,
         help="新聞與工程會結果都存在時，按下執行按鈕後自動重寫 115EMAP案管_更新版.xlsx。"
     )
+    if _llm_key_loaded():
+        st.success("LLM Key 狀態：已載入")
+    else:
+        st.error("LLM Key 狀態：未載入（目前會使用 fallback 去重）")
 
     st.markdown("---")
     run_news = st.button("執行新聞爬搜", width="stretch")
