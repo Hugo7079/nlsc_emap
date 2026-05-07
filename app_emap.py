@@ -14,6 +14,9 @@ NLSC 臺灣通用電子地圖 異動情資蒐整 — Streamlit 互動介面
 import sys
 import importlib
 import os
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -98,6 +101,35 @@ _sync_llm_runtime_config()
 def _llm_key_loaded() -> bool:
     return bool(str(mod.LLM_CFG.get("api_key", "")).strip())
 
+
+def _test_llm_connection() -> tuple[bool, str]:
+    api_key = str(mod.LLM_CFG.get("api_key", "")).strip()
+    if not api_key:
+        return False, "未載入 EMAP_LLM_API_KEY"
+
+    base = str(mod.LLM_CFG.get("base_url", "")).strip().rstrip("/")
+    if not base:
+        return False, "未設定 EMAP_LLM_BASE_URL"
+    if not base.endswith("/v1"):
+        base += "/v1"
+
+    req = urllib.request.Request(
+        f"{base}/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    timeout = int(mod.LLM_CFG.get("timeout", 30) or 30)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        models = payload.get("data", []) if isinstance(payload, dict) else []
+        return True, f"LLM 連線成功（models: {len(models)}）"
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")[:120]
+        return False, f"LLM 連線失敗：HTTP {e.code} {body}"
+    except Exception as e:
+        return False, f"LLM 連線失敗：{type(e).__name__} {e}"
+
 # 所有支援的縣市清單
 ALL_CITIES = [
     "臺北市", "新北市", "桃園市", "臺中市", "臺南市", "高雄市",
@@ -180,6 +212,21 @@ with st.sidebar:
         value=10,
         step=5,
     )
+    manual_news_urls_text = st.text_area(
+        "手動補充新聞網址（每行一筆）",
+        value="",
+        placeholder="https://udn.com/news/story/7314/9488025",
+        help="可手動補一篇未被 RSS/JSON 收到的新聞；同篇可自動拆成多筆案件。"
+    )
+    manual_news_urls = []
+    for line in manual_news_urls_text.splitlines():
+        u = line.strip()
+        if u.startswith("http://") or u.startswith("https://"):
+            manual_news_urls.append(u)
+    manual_news_urls = list(dict.fromkeys(manual_news_urls))
+    if manual_news_urls:
+        st.caption(f"手動網址：{len(manual_news_urls)} 筆")
+
     show_dedup = st.checkbox("顯示去重追蹤（Debug）", value=False)
     auto_update = st.checkbox(
         "分析完成後自動更新案管檔",
@@ -190,6 +237,12 @@ with st.sidebar:
         st.success("LLM Key 狀態：已載入")
     else:
         st.error("LLM Key 狀態：未載入（目前會使用 fallback 去重）")
+    if st.button("測試 LLM 連線", width="stretch"):
+        ok, msg = _test_llm_connection()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
 
     st.markdown("---")
     run_news = st.button("執行新聞爬搜", width="stretch")
@@ -221,7 +274,7 @@ def apply_params():
 # 快取執行結果（依參數組合 cache）
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def run_news_search(cities_key, news_days_val, web_qty_val):
+def run_news_search(cities_key, news_days_val, web_qty_val, manual_urls_key):
     apply_params()
     mod.LLM_DEDUP = True
     nlsc_df = pd.read_excel(mod.NLSC_FORM, sheet_name="工作表2")
@@ -232,7 +285,10 @@ def run_news_search(cities_key, news_days_val, web_qty_val):
         mod.NEWS_CITIES, mod.NEWS_CITIES_SHORT, nlsc_df)
     json_news, json_dedup = mod.parse_news_json(loc_kws, build_kws, noise_kws)
     web_news,  web_dedup  = mod.web_search_news(loc_kws, build_kws, noise_kws)
-    all_news  = mod.merge_news(json_news, web_news)
+    manual_urls = [u.strip() for u in str(manual_urls_key or "").splitlines() if u.strip()]
+    manual_news, manual_dedup = mod.parse_manual_news_urls(manual_urls, loc_kws, build_kws, noise_kws)
+    all_news = mod.merge_news(mod.merge_news(json_news, web_news), manual_news)
+    web_dedup = (web_dedup or []) + (manual_dedup or [])
     return all_news, json_news, web_news, json_dedup, web_dedup, loc_kws
 
 @st.cache_data(show_spinner=False)
@@ -280,6 +336,7 @@ if "last_pcc_refresh" not in st.session_state: st.session_state.last_pcc_refresh
 if "last_update_refresh" not in st.session_state: st.session_state.last_update_refresh = None
 
 cities_key = ",".join(sorted(selected_cities))
+manual_urls_key = "\n".join(manual_news_urls)
 
 # ─────────────────────────────────────────────────────────────
 # 執行搜尋
@@ -299,9 +356,9 @@ if run_all:
 
 if run_news or run_all:
     apply_params()
-    with st.spinner("正在搜尋新聞（JSON + Google News RSS）..."):
+    with st.spinner("正在搜尋新聞（JSON + Google News RSS + 手動網址）..."):
         try:
-            result = run_news_search(cities_key, news_days, web_qty)
+            result = run_news_search(cities_key, news_days, web_qty, manual_urls_key)
             st.session_state.news_result = result
             st.session_state.cities_key  = cities_key
             st.session_state.last_news_refresh = datetime.now()
@@ -336,9 +393,9 @@ if run_update or run_all or should_auto_update:
         st.session_state.pcc_result = None
 
     if st.session_state.news_result is None:
-        with st.spinner("重新執行新聞爬搜，確保更新版使用最新 LLM 去重結果..."):
+        with st.spinner("重新執行新聞爬搜（含手動網址），確保更新版使用最新 LLM 去重結果..."):
             try:
-                st.session_state.news_result = run_news_search(cities_key, news_days, web_qty)
+                st.session_state.news_result = run_news_search(cities_key, news_days, web_qty, manual_urls_key)
                 st.session_state.last_news_refresh = datetime.now()
             except Exception as e:
                 st.session_state.error_msg = f"新聞搜尋失敗，無法產出案管更新版：{e}"
@@ -382,7 +439,7 @@ with tab_flow:
         {"步驟": "1. 載入資料", "輸入": "NLSC案管表、工程會JSON、新聞JSON、關鍵字TXT", "處理": "統一讀檔並保留原始表單", "輸出": "可追蹤資料來源"},
         {"步驟": "2. 動態衍生關鍵字", "輸入": "縣市設定 + NLSC參考門牌", "處理": "產生縣市、縮寫、道路位置詞", "輸出": "新聞與工程會共用篩選條件"},
         {"步驟": "3. 工程會清冊", "輸入": "20260127 / 20260415 JSON", "處理": "金額、關鍵字、既有案、前次篩選交叉比對", "輸出": "新增建議、進度異動、摘要"},
-        {"步驟": "4. 新聞爬搜", "輸入": "每日新聞JSON + Google News RSS", "處理": "位置/工程詞/鄰近性/LLM去重整併", "輸出": "案名、網址、備註、進度、完工日"},
+        {"步驟": "4. 新聞爬搜", "輸入": "每日新聞JSON + Google News RSS + 手動網址", "處理": "位置/工程詞/鄰近性/LLM去重整併；單篇可拆多案", "輸出": "案名、網址、備註、進度、完工日"},
         {"步驟": "5. 案管更新", "輸入": "工程會異動 + 新聞結果", "處理": "既有案更新；未命中新聞新增候選列", "輸出": "115EMAP案管_更新版.xlsx + 更新日誌"},
     ])
     st.dataframe(flow_steps, width="stretch", hide_index=True, height=220)
@@ -436,6 +493,11 @@ with tab_news:
 
         st.divider()
 
+        df_news = pd.DataFrame(all_news)
+        src_options = sorted(
+            df_news.get("來源分類", pd.Series(dtype="object")).dropna().astype(str).unique().tolist()
+        ) if not df_news.empty else []
+
         # ── 搜尋/過濾列 ─────────────────────────────────────────
         col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
         with col_f1:
@@ -445,12 +507,11 @@ with tab_news:
         with col_f3:
             src_filter = st.multiselect(
                 "來源篩選",
-                options=["JSON新聞資料", "Web Search", "JSON新聞資料+Web Search"],
+                options=src_options,
                 default=[]
             )
 
         # ── 套用過濾 ─────────────────────────────────────────────
-        df_news = pd.DataFrame(all_news)
         if df_news.empty:
             st.warning("沒有找到符合條件的新聞。請嘗試調整搜尋條件（擴大地區或時間範圍）。")
         else:

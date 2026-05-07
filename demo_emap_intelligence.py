@@ -244,6 +244,122 @@ def _extract_case_name(title: str, content: str) -> str:
     return cleaned[:40].strip()
 
 
+def _extract_case_name_candidates(title: str, content: str, max_cases: int = 8) -> list[str]:
+    """
+    單篇新聞可拆多案件：先抓「XXX工程」與路線型案件（台61線/台62線），
+    若仍抓不到再退回既有單案名邏輯。
+    """
+    full = f"{title} {content[:3500]}"
+    candidates: list[str] = []
+
+    # 1) 直接抓「XXX工程」
+    for m in re.finditer(r'[一-鿿（）()A-Za-z0-9、，,\-／/\s]{4,40}工程', full):
+        name = re.sub(r'\s+', '', m.group(0)).strip("，。、；：")
+        if 4 <= len(name) <= 26:
+            candidates.append(name)
+
+    # 2) 路線型案件（如 台61線、台62線）可拆為多筆
+    route_hits = list(dict.fromkeys(re.findall(r'台[0-9]{1,3}線', full)))
+    action_words = ["擴建", "延伸", "新建", "改善", "拓寬", "改建", "高架化", "南延", "西延", "東延"]
+    for route in route_hits:
+        idx = full.find(route)
+        window = full[max(0, idx - 30): idx + 80] if idx >= 0 else full[:120]
+        action = next((w for w in action_words if w in window), "")
+        suffix = f"{action}工程" if action else "工程"
+        candidates.append(f"{route}{suffix}")
+
+    if not candidates:
+        single = _extract_case_name(title, content)
+        return [single] if single else []
+
+    unique: list[str] = []
+    seen = set()
+    for c in candidates:
+        key = _dedup_key(c) or c
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(c)
+        if len(unique) >= max_cases:
+            break
+    return unique
+
+
+def _extract_news_article_from_url(url: str) -> dict:
+    """抓取單篇新聞網址並萃取標題、日期、內文。"""
+    import html as _html
+    import urllib.parse as _up
+    import urllib.request as _ur
+
+    req = _ur.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "zh-TW,zh;q=0.9",
+        },
+    )
+    with _ur.urlopen(req, timeout=15) as resp:
+        page = resp.read().decode("utf-8", errors="ignore")
+
+    def _meta_content(*keys: str) -> str:
+        for key in keys:
+            pat1 = rf'<meta[^>]+(?:property|name)=["\']{re.escape(key)}["\'][^>]*content=["\']([^"\']+)["\']'
+            pat2 = rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(key)}["\']'
+            m = re.search(pat1, page, flags=re.IGNORECASE)
+            if not m:
+                m = re.search(pat2, page, flags=re.IGNORECASE)
+            if m:
+                return _html.unescape(m.group(1)).strip()
+        return ""
+
+    title = _meta_content("og:title", "twitter:title", "title")
+    if not title:
+        m = re.search(r'<title>(.*?)</title>', page, flags=re.IGNORECASE | re.DOTALL)
+        title = _html.unescape(m.group(1)).strip() if m else ""
+    title = _clean_news_title(title)
+
+    published_raw = _meta_content("article:published_time", "pubdate", "datePublished")
+    dm = re.search(r'(\d{4}-\d{2}-\d{2})', published_raw or "")
+    date_str = dm.group(1) if dm else str(date.today())
+
+    # 優先抓文章主體 editor 區塊，避免吃到延伸閱讀
+    block = ""
+    m_editor = re.search(
+        r'<section[^>]*class="[^"]*article-content__editor[^"]*"[^>]*>(.*?)</section>',
+        page, flags=re.IGNORECASE | re.DOTALL
+    )
+    if m_editor:
+        block = m_editor.group(1)
+    else:
+        m_article = re.search(
+            r'<article[^>]*class="[^"]*article-content[^"]*"[^>]*>(.*?)</article>',
+            page, flags=re.IGNORECASE | re.DOTALL
+        )
+        if m_article:
+            block = m_article.group(1)
+
+    paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', block, flags=re.IGNORECASE | re.DOTALL) if block else []
+    body_parts: list[str] = []
+    for p in paragraphs:
+        txt = re.sub(r'<[^>]+>', '', p)
+        txt = _html.unescape(txt).strip()
+        txt = re.sub(r'\s+', ' ', txt)
+        if len(txt) >= 8:
+            body_parts.append(txt)
+    body = " ".join(body_parts)
+    if len(body) < 30:
+        body = _meta_content("og:description", "description")
+
+    source = _up.urlparse(url).netloc or "手動網址"
+    return {
+        "title": title,
+        "body": body,
+        "url": url,
+        "source": source,
+        "date": date_str,
+    }
+
+
 def _loc_build_proximity(text: str, loc_kws: list, build_kws: list) -> bool:
     """位置關鍵字與工程關鍵字需在 PROXIMITY_CHARS 字元內共現"""
     for loc in loc_kws:
@@ -337,9 +453,13 @@ def _llm_is_construction(title: str, body: str) -> tuple[bool, str]:
 
 def _dedup_key(case_name: str) -> str:
     """文字備援用桶鍵；LLM 不可用時才作為主要去重依據。"""
-    # 去除數字、符號，只留核心詞
-    key = re.sub(r'[0-9A-Za-z（）()！？!?:：.,，。、\s]', '', case_name)
+    # 保留數字（例如台61線/台62線）避免不同路線被誤合併
+    key = re.sub(r'[A-Za-z（）()！？!?:：.,，。、\s]', '', case_name)
     return key[:20]
+
+
+def _route_tags(text: str) -> set[str]:
+    return set(re.findall(r'台[0-9]{1,3}線', str(text or "")))
 
 
 def _clean_news_title(title: str) -> str:
@@ -367,6 +487,13 @@ def _fallback_same_news_event(a: dict, b: dict) -> tuple[bool, str]:
     """LLM 不可用時的保守備援：案名/標題核心高度重疊才合併。"""
     a_case, b_case = a.get("_case", ""), b.get("_case", "")
     a_title, b_title = _clean_news_title(a.get("_title", "")), _clean_news_title(b.get("_title", ""))
+    ra_case, rb_case = _route_tags(a_case), _route_tags(b_case)
+    if ra_case and rb_case and ra_case.isdisjoint(rb_case):
+        return False, f"fallback: 案名路線不同({sorted(ra_case)} vs {sorted(rb_case)})"
+    ra = ra_case or _route_tags(a_title)
+    rb = rb_case or _route_tags(b_title)
+    if ra and rb and ra.isdisjoint(rb):
+        return False, f"fallback: 路線不同({sorted(ra)} vs {sorted(rb)})"
     if _dedup_key(a_case) and _dedup_key(a_case) == _dedup_key(b_case):
         return True, "fallback: 案名桶鍵相同"
     score = max(_overlap_score(a_case, b_case), _overlap_score(a_title, b_title))
@@ -377,6 +504,13 @@ def _high_confidence_same_news_event(a: dict, b: dict) -> tuple[bool, str]:
     """LLM 判不同時的高信心保護：同日且核心標題/案名高度重疊才合併。"""
     a_case, b_case = a.get("_case", ""), b.get("_case", "")
     a_title, b_title = _clean_news_title(a.get("_title", "")), _clean_news_title(b.get("_title", ""))
+    ra_case, rb_case = _route_tags(a_case), _route_tags(b_case)
+    if ra_case and rb_case and ra_case.isdisjoint(rb_case):
+        return False, f"案名路線不同({sorted(ra_case)} vs {sorted(rb_case)})"
+    ra = ra_case or _route_tags(a_title)
+    rb = rb_case or _route_tags(b_title)
+    if ra and rb and ra.isdisjoint(rb):
+        return False, f"路線不同({sorted(ra)} vs {sorted(rb)})"
     score = max(_overlap_score(a_case, b_case), _overlap_score(a_title, b_title))
     same_date = str(a.get("_date", "") or "")[:10] == str(b.get("_date", "") or "")[:10]
     if score >= 0.9 or (same_date and score >= 0.75):
@@ -899,6 +1033,136 @@ def web_search_supplement(case_name: str, location: str, city: str = "") -> dict
         "補充網址":     best.get("url", ""),
         "補充摘要":     body[:200].replace("\n", " "),
     }
+
+
+def parse_manual_news_urls(urls: list[str], loc_kws: list, build_kws: list, noise_kws: list) -> tuple[list, list]:
+    """
+    手動補充新聞網址：
+    - 支援單篇拆多案件（同一篇含多路線/多工程時拆成多筆）
+    - 仍走既有 LLM 後分類與去重流程
+    """
+    valid_urls = []
+    for u in urls or []:
+        u = str(u or "").strip()
+        if u.startswith("http://") or u.startswith("https://"):
+            valid_urls.append(u)
+    valid_urls = list(dict.fromkeys(valid_urls))
+    if not valid_urls:
+        return [], []
+
+    buckets: dict[str, dict] = {}
+    dedup_track: list[dict] = []
+    track_seq = 0
+
+    for url in valid_urls:
+        try:
+            article = _extract_news_article_from_url(url)
+        except Exception as e:
+            dedup_track.append({
+                "track_id": 0,
+                "title": url,
+                "date": "",
+                "content_len": 0,
+                "llm_label": "⚠ 讀取失敗",
+                "bucket_key": "—",
+                "dedup_reason": f"抓取失敗:{type(e).__name__}",
+                "result": "略過",
+            })
+            continue
+
+        title = article.get("title", "")
+        body = article.get("body", "")
+        date_str = article.get("date", "")
+        source = article.get("source", "")
+        text = f"{title} {body}"
+
+        noise_hit = any(nk in text for nk in noise_kws)
+
+        ok, reason = _llm_is_construction(title, body)
+        if not ok:
+            dedup_track.append({
+                "track_id": 0,
+                "title": title or url,
+                "date": date_str,
+                "content_len": len(body),
+                "llm_label": "❌ 非工程",
+                "bucket_key": "—",
+                "dedup_reason": reason,
+                "result": "LLM排除",
+            })
+            continue
+
+        case_names = _extract_case_name_candidates(title, body)
+        if not case_names:
+            case_names = [_extract_case_name(title, body)]
+
+        for case_name in case_names:
+            track_seq += 1
+            route_m = re.search(r'台[0-9]{1,3}線', case_name)
+            anchor = route_m.group(0) if route_m else case_name
+            idx = text.find(anchor)
+            snippet = text[max(0, idx - 90): idx + 260] if idx >= 0 else text[:350]
+            snippet = snippet.replace("\n", " ").strip()
+
+            city_hit = next((c for c in NEWS_CITIES if c in snippet),
+                            next((c for c in NEWS_CITIES if c in text), NEWS_CITIES[0]))
+            loc_hit = next((lk for lk in loc_kws if lk in snippet),
+                           next((lk for lk in loc_kws if lk in text), city_hit))
+
+            record = {
+                "新聞標題":     title,
+                "案名":         case_name,
+                "網址":         _clean_url(url),
+                "備註":         snippet[:300],
+                "通報日期":     date_str,
+                "縣市":         city_hit,
+                "參考位置":     loc_hit,
+                "工程進度":     _extract_progress(snippet),
+                "工程現況":     snippet[:200],
+                "(預計)完工日": _extract_completion(snippet),
+                "來源":         source,
+                "來源分類":     "手動網址",
+            }
+
+            candidate = {
+                "_body": " ".join([
+                    record.get("備註", ""),
+                    record.get("工程現況", ""),
+                    record.get("參考位置", ""),
+                ]),
+                "_title": record.get("新聞標題", ""),
+                "_url": record.get("網址", ""),
+                "_source": record.get("來源", ""),
+                "_date": record.get("通報日期", ""),
+                "_case": record.get("案名", ""),
+                "_track_id": track_seq,
+                "_record": record,
+            }
+            bkt_key, dedup_reason = _resolve_news_bucket(candidate, buckets, "_body")
+            dedup_track.append({
+                "track_id": track_seq,
+                "title": title,
+                "date": date_str,
+                "content_len": len(body),
+                "llm_label": "✅ 是工程新聞",
+                "bucket_key": bkt_key,
+                "dedup_reason": f"{dedup_reason}; 手動網址{'命中排除詞但保留處理' if noise_hit else '直接處理'}",
+                "result": "PENDING",
+            })
+
+            existing = buckets.get(bkt_key)
+            if existing is None or _prefer_news_candidate(candidate, existing, "_body"):
+                buckets[bkt_key] = candidate
+
+    winner_ids = {v.get("_track_id") for v in buckets.values()}
+    for entry in dedup_track:
+        if entry.get("result") == "PENDING":
+            entry["result"] = "✅ 保留" if entry.get("track_id") in winner_ids else "🔀 去重"
+
+    results = [v["_record"] for v in buckets.values()]
+    results.sort(key=lambda x: x.get("通報日期", ""), reverse=True)
+    print(f"  → 手動網址命中 {len(results)} 筆（單篇可拆多案）")
+    return results, dedup_track
 
 
 # ─────────────────────────────────────────────────────────────
