@@ -649,7 +649,7 @@ with tab_pcc:
                     return "background-color: #fff3cd" if "有異動" in str(val) else ""
 
                 st.dataframe(
-                    df_t2.style.applymap(_color_changed, subset=["有無異動"])
+                    df_t2.style.map(_color_changed, subset=["有無異動"])
                     if "有無異動" in df_t2.columns else df_t2,
                     width="stretch", height=400
                 )
